@@ -1,0 +1,393 @@
+package fuse
+
+import (
+	"context"
+	"io"
+	"os"
+	"sync"
+	"syscall"
+	"time"
+
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"github.com/aydinke/gdrivefs/internal/cache"
+	"github.com/aydinke/gdrivefs/internal/drive"
+)
+
+type Filesystem struct {
+	client    *drive.Client
+	rootID    string
+	inodes    *InodeMap
+	openFiles map[uint64]*OpenFile
+	mu        sync.RWMutex
+	nextFH    uint64
+}
+
+type OpenFile struct {
+	ID        string
+	TempPath  string
+	Flags     fuse.OpenFlags
+	WritePos  int64
+	LocalMod  time.Time
+	Modified  bool
+}
+
+func NewFilesystem(client *drive.Client, rootID string) *Filesystem {
+	return &Filesystem{
+		client:    client,
+		rootID:    rootID,
+		inodes:    NewInodeMap(),
+		openFiles: make(map[uint64]*OpenFile),
+		nextFH:    1,
+	}
+}
+
+func (f *Filesystem) Root() (fs.Node, error) {
+	return &Dir{
+		fs:   f,
+		ID:   f.rootID,
+		Name: "",
+	}, nil
+}
+
+func (f *Filesystem) Destroy() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, of := range f.openFiles {
+		if of.TempPath != "" {
+			os.Remove(of.TempPath)
+		}
+	}
+	f.openFiles = make(map[uint64]*OpenFile)
+}
+
+type InodeMap struct {
+	mu     sync.RWMutex
+	byID   map[string]uint64
+	byIno  map[uint64]string
+	next   uint64
+}
+
+func NewInodeMap() *InodeMap {
+	return &InodeMap{
+		byID:  make(map[string]uint64),
+		byIno: make(map[uint64]string),
+		next:  2,
+	}
+}
+
+func (m *InodeMap) GetOrAssign(id string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ino, ok := m.byID[id]; ok {
+		return ino
+	}
+	ino := m.next
+	m.next++
+	m.byID[id] = ino
+	m.byIno[ino] = id
+	return ino
+}
+
+func (m *InodeMap) GetID(ino uint64) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.byIno[ino]
+	return id, ok
+}
+
+type Dir struct {
+	fs   *Filesystem
+	ID   string
+	Name string
+}
+
+func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
+	a.Mode = os.ModeDir | 0755
+	a.Uid = uint32(os.Getuid())
+	a.Gid = uint32(os.Getgid())
+	a.Inode = d.fs.inodes.GetOrAssign(d.ID)
+	a.Valid = 5 * time.Second
+	return nil
+}
+
+func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	meta, err := d.fs.client.GetFileByName(ctx, d.ID, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fuse.ENOENT
+		}
+		return nil, err
+	}
+	if meta.IsDir {
+		return &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}, nil
+	}
+	return &File{fs: d.fs, ID: meta.ID, Name: meta.Name, meta: meta}, nil
+}
+
+func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	children, err := d.fs.client.ListChildren(ctx, d.ID)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]fuse.Dirent, len(children))
+	for i, c := range children {
+		ino := d.fs.inodes.GetOrAssign(c.ID)
+		ent := fuse.Dirent{
+			Inode: ino,
+			Name:  c.Name,
+		}
+		if c.IsDir {
+			ent.Type = fuse.DT_Dir
+		} else {
+			ent.Type = fuse.DT_File
+		}
+		entries[i] = ent
+	}
+	return entries, nil
+}
+
+func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+	meta, err := d.fs.client.CreateFolder(ctx, d.ID, req.Name)
+	if err != nil {
+		return nil, err
+	}
+	return &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}, nil
+}
+
+func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	tmpFile, err := d.fs.client.CreateTempUploadFile()
+	if err != nil {
+		return nil, nil, err
+	}
+	of := &OpenFile{
+		TempPath: tmpFile.Name(),
+		Flags:    req.Flags,
+	}
+	d.fs.mu.Lock()
+	of.ID = ""
+	fh := d.fs.nextFH
+	d.fs.nextFH++
+	d.fs.openFiles[fh] = of
+	d.fs.mu.Unlock()
+
+	node := &File{fs: d.fs, ID: "", Name: req.Name, tempPath: tmpFile.Name(), fh: fh}
+	return node, &FileHandle{fs: d.fs, fh: fh}, nil
+}
+
+func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	meta, err := d.fs.client.GetFileByName(ctx, d.ID, req.Name)
+	if err != nil {
+		return err
+	}
+	return d.fs.client.Delete(ctx, meta.ID)
+}
+
+func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
+	newDirNode, ok := newDir.(*Dir)
+	if !ok {
+		return fuse.EIO
+	}
+	meta, err := d.fs.client.GetFileByName(ctx, d.ID, req.OldName)
+	if err != nil {
+		return err
+	}
+	if req.NewName != req.OldName {
+		if _, err := d.fs.client.Rename(ctx, meta.ID, req.NewName); err != nil {
+			return err
+		}
+	}
+	if newDirNode.ID != d.ID {
+		if _, err := d.fs.client.Move(ctx, meta.ID, newDirNode.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type File struct {
+	fs       *Filesystem
+	ID       string
+	Name     string
+	meta     *cache.FileMeta
+	tempPath string
+	fh       uint64
+}
+
+func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
+	if f.meta == nil && f.ID != "" {
+		meta, err := f.fs.client.GetFile(ctx, f.ID)
+		if err != nil {
+			return err
+		}
+		f.meta = meta
+	}
+	a.Mode = 0644
+	a.Uid = uint32(os.Getuid())
+	a.Gid = uint32(os.Getgid())
+	if f.meta != nil {
+		a.Size = uint64(f.meta.Size)
+		a.Mtime = f.meta.ModTime
+	}
+	a.Inode = f.fs.inodes.GetOrAssign(f.ID)
+	return nil
+}
+
+func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	if f.ID == "" {
+		return nil, fuse.EIO
+	}
+	tmpFile, err := f.fs.client.CreateTempUploadFile()
+	if err != nil {
+		return nil, err
+	}
+	defer tmpFile.Close()
+
+	rc, err := f.fs.client.Download(ctx, f.ID)
+	if err != nil {
+		os.Remove(tmpFile.Name())
+		return nil, err
+	}
+	defer rc.Close()
+
+	if _, err := tmpFile.ReadFrom(rc); err != nil {
+		os.Remove(tmpFile.Name())
+		return nil, err
+	}
+
+	of := &OpenFile{
+		ID:       f.ID,
+		TempPath: tmpFile.Name(),
+		Flags:    req.Flags,
+		LocalMod: time.Now(),
+	}
+
+	f.fs.mu.Lock()
+	fh := f.fs.nextFH
+	f.fs.nextFH++
+	f.fs.openFiles[fh] = of
+	f.fs.mu.Unlock()
+
+	f.tempPath = tmpFile.Name()
+	f.fh = fh
+	return &FileHandle{fs: f.fs, fh: fh}, nil
+}
+
+type FileHandle struct {
+	fs *Filesystem
+	fh uint64
+}
+
+func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	h.fs.mu.RLock()
+	of, ok := h.fs.openFiles[h.fh]
+	h.fs.mu.RUnlock()
+	if !ok {
+		return fuse.EIO
+	}
+
+	data := make([]byte, req.Size)
+	file, err := os.Open(of.TempPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	n, err := file.ReadAt(data, req.Offset)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	resp.Data = data[:n]
+	return nil
+}
+
+func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	h.fs.mu.Lock()
+	of, ok := h.fs.openFiles[h.fh]
+	h.fs.mu.Unlock()
+	if !ok {
+		return fuse.EIO
+	}
+
+	file, err := os.OpenFile(of.TempPath, os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	n, err := file.WriteAt(req.Data, req.Offset)
+	if err != nil {
+		return err
+	}
+	resp.Size = n
+	of.Modified = true
+	of.WritePos = req.Offset + int64(n)
+	return nil
+}
+
+func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	h.fs.mu.Lock()
+	of, ok := h.fs.openFiles[h.fh]
+	h.fs.mu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	if !of.Modified || of.ID == "" {
+		return nil
+	}
+
+	file, err := os.Open(of.TempPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = h.fs.client.UploadWithConflictCheck(ctx, of.ID, file, of.LocalMod)
+	if err != nil {
+		if _, ok := err.(*drive.ConflictError); ok {
+			return syscall.EBUSY
+		}
+		return err
+	}
+	of.Modified = false
+	return nil
+}
+
+func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	h.fs.mu.Lock()
+	defer h.fs.mu.Unlock()
+	of, ok := h.fs.openFiles[h.fh]
+	if !ok {
+		return nil
+	}
+
+	if of.Modified {
+		if of.ID != "" {
+			file, err := os.Open(of.TempPath)
+			if err == nil {
+				h.fs.client.UploadWithConflictCheck(ctx, of.ID, file, of.LocalMod)
+				file.Close()
+			}
+		} else {
+			file, err := os.Open(of.TempPath)
+			if err == nil {
+				meta, err := h.fs.client.Upload(ctx, h.fs.rootID, "newfile", file, "application/octet-stream")
+				if err == nil {
+					of.ID = meta.ID
+				}
+				file.Close()
+			}
+		}
+	}
+
+	if of.TempPath != "" {
+		os.Remove(of.TempPath)
+	}
+	delete(h.fs.openFiles, h.fh)
+	return nil
+}
+
+func (h *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	return h.Flush(ctx, nil)
+}
