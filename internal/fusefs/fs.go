@@ -68,38 +68,42 @@ func (f *Filesystem) getNode(id string) fs.Node {
 }
 
 func (f *Filesystem) invalidateEntry(parentID, name string) {
-	if f.server == nil {
-		return
-	}
-	parent := f.getNode(parentID)
-	if parent == nil {
-		debugLog.Printf("invalidateEntry: parent node not found in cache for %s", parentID)
-		return
-	}
-	debugLog.Printf("invalidateEntry: parentID=%s name=%s", parentID, name)
+	go func() {
+		if f.server == nil {
+			return
+		}
+		parent := f.getNode(parentID)
+		if parent == nil {
+			debugLog.Printf("invalidateEntry: parent node not found in cache for %s", parentID)
+			return
+		}
+		debugLog.Printf("invalidateEntry: parentID=%s name=%s", parentID, name)
 
-	if err := f.server.InvalidateEntry(parent, name); err != nil {
-		debugLog.Printf("invalidateEntry error: %v", err)
-	}
+		if err := f.server.InvalidateEntry(parent, name); err != nil {
+			debugLog.Printf("invalidateEntry error: %v", err)
+		}
 
-	if err := f.server.InvalidateNodeAttr(parent); err != nil {
-		debugLog.Printf("invalidateNodeAttr (parent) error: %v", err)
-	}
+		if err := f.server.InvalidateNodeAttr(parent); err != nil {
+			debugLog.Printf("invalidateNodeAttr (parent) error: %v", err)
+		}
+	}()
 }
 
 func (f *Filesystem) invalidateNode(id string) {
-	if f.server == nil {
-		return
-	}
-	node := f.getNode(id)
-	if node == nil {
-		debugLog.Printf("invalidateNode: node not found in cache for %s", id)
-		return
-	}
-	debugLog.Printf("invalidateNode: id=%s", id)
-	if err := f.server.InvalidateNodeAttr(node); err != nil {
-		debugLog.Printf("invalidateNode error: %v", err)
-	}
+	go func() {
+		if f.server == nil {
+			return
+		}
+		node := f.getNode(id)
+		if node == nil {
+			debugLog.Printf("invalidateNode: node not found in cache for %s", id)
+			return
+		}
+		debugLog.Printf("invalidateNode: id=%s", id)
+		if err := f.server.InvalidateNodeAttr(node); err != nil {
+			debugLog.Printf("invalidateNode error: %v", err)
+		}
+	}()
 }
 
 func (f *Filesystem) Root() (fs.Node, error) {
@@ -322,6 +326,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	if f.meta == nil && f.ID != "" {
 		meta, err := f.fs.client.GetFile(ctx, f.ID)
 		if err != nil {
+			debugLog.Printf("Attr: error getting file %s: %v", f.ID, err)
 			return err
 		}
 		f.meta = meta
@@ -329,11 +334,13 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Mode = 0644
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
+	a.Size = 0
 	if f.meta != nil {
 		a.Size = uint64(f.meta.Size)
 		a.Mtime = f.meta.ModTime
 	}
 	a.Inode = f.fs.inodes.GetOrAssign(f.ID)
+	debugLog.Printf("Attr: name=%s id=%s size=%d", f.Name, f.ID, a.Size)
 	return nil
 }
 
@@ -393,7 +400,6 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	f.fs.openFiles[fh] = of
 	f.fs.mu.Unlock()
 
-	resp.Flags |= fuse.OpenKeepCache
 	debugLog.Printf("Open: assigned fh=%d", fh)
 	return &FileHandle{fs: f.fs, fh: fh}, nil
 }
