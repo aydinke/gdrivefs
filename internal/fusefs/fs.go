@@ -339,8 +339,11 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	if f.ID == "" {
+		debugLog.Printf("Open: empty ID for file")
 		return nil, fuse.EIO
 	}
+
+	debugLog.Printf("Open: name=%s id=%s mimeType=%s flags=%v", f.Name, f.ID, f.meta.MimeType, req.Flags)
 
 	tmpFile, err := f.fs.client.CreateTempUploadFile()
 	if err != nil {
@@ -349,10 +352,12 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	}
 
 	var rc io.ReadCloser
-	if drive.IsGoogleDoc(f.meta.MimeType) {
+	if f.meta != nil && drive.IsGoogleDoc(f.meta.MimeType) {
 		exportMime := drive.GetExportMimeType(f.meta.MimeType)
+		debugLog.Printf("Open: exporting Google Doc as %s", exportMime)
 		rc, err = f.fs.client.ExportGoogleDoc(ctx, f.ID, exportMime)
 	} else {
+		debugLog.Printf("Open: downloading file")
 		rc, err = f.fs.client.Download(ctx, f.ID)
 	}
 	if err != nil {
@@ -362,7 +367,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		return nil, err
 	}
 
-	_, err = tmpFile.ReadFrom(rc)
+	n, err := tmpFile.ReadFrom(rc)
 	rc.Close()
 	tmpFile.Close()
 	if err != nil {
@@ -370,6 +375,8 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		debugLog.Printf("Open: write temp file error: %v", err)
 		return nil, err
 	}
+
+	debugLog.Printf("Open: downloaded %d bytes to %s", n, tmpFile.Name())
 
 	of := &OpenFile{
 		ID:       f.ID,
@@ -386,6 +393,8 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	f.fs.openFiles[fh] = of
 	f.fs.mu.Unlock()
 
+	resp.Flags |= fuse.OpenKeepCache
+	debugLog.Printf("Open: assigned fh=%d", fh)
 	return &FileHandle{fs: f.fs, fh: fh}, nil
 }
 
@@ -405,7 +414,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 
 	file, err := os.Open(of.TempPath)
 	if err != nil {
-		debugLog.Printf("Read: open temp file error: %v", err)
+		debugLog.Printf("Read: open temp file %s error: %v", of.TempPath, err)
 		return err
 	}
 	defer file.Close()
