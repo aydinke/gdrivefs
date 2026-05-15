@@ -392,6 +392,11 @@ func runDisable(cmd *cobra.Command, args []string) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) {
+	if err := config.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize config: %v\n", err)
+		os.Exit(1)
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
@@ -417,9 +422,12 @@ func runStatus(cmd *cobra.Command, args []string) {
 		fmt.Println("Auth status: not authenticated")
 	}
 
-	fmt.Println("\nMount points:")
-	for name, mnt := range config.Get().Mounts {
-		fmt.Printf("  %s -> %s (auto: %v)\n", name, mnt.Path, mnt.AutoMount)
+	cfg := config.Get()
+	if cfg != nil && len(cfg.Mounts) > 0 {
+		fmt.Println("\nMount points:")
+		for name, mnt := range cfg.Mounts {
+			fmt.Printf("  %s -> %s (auto: %v)\n", name, mnt.Path, mnt.AutoMount)
+		}
 	}
 }
 
