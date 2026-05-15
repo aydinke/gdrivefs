@@ -126,25 +126,15 @@ func runAuthLogin(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	df := auth.NewDeviceFlow(creds)
+	flow := auth.NewOAuthFlow(creds, 8085)
 
-	fmt.Println("Starting OAuth device flow...")
-	deviceCode, err := df.RequestDeviceCode(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to request device code: %v\n", err)
-		os.Exit(1)
-	}
+	fmt.Println("Starting OAuth flow...")
+	fmt.Println("A browser window will open for you to authorize gdrivefs.")
 
-	fmt.Printf("\n╭───────────────────────────────────────────────────────╮\n")
-	fmt.Printf("│  Please visit: %-39s │\n", deviceCode.VerificationURL)
-	fmt.Printf("│  And enter code: %-36s │\n", deviceCode.UserCode)
-	fmt.Printf("╰───────────────────────────────────────────────────────╯\n")
-	fmt.Println("\nWaiting for authorization...")
-
-	pollCtx, cancel := context.WithTimeout(ctx, time.Duration(deviceCode.ExpiresIn)*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	token, err := df.PollForToken(pollCtx, deviceCode.DeviceCode, deviceCode.Interval)
+	token, err := flow.StartLocalServer(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get token: %v\n", err)
 		os.Exit(1)

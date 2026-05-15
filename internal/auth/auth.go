@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -152,125 +153,151 @@ func (s *TokenStore) Delete() error {
 	return os.Remove(s.path)
 }
 
-type DeviceFlow struct {
+type OAuthFlow struct {
 	Credentials *Credentials
-	httpClient   *http.Client
+	Port        int
+	httpClient  *http.Client
 }
 
-func NewDeviceFlow(creds *Credentials) *DeviceFlow {
-	return &DeviceFlow{
+func NewOAuthFlow(creds *Credentials, port int) *OAuthFlow {
+	if port == 0 {
+		port = 8085
+	}
+	return &OAuthFlow{
 		Credentials: creds,
+		Port:        port,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-type DeviceCodeResponse struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURL string `json:"verification_url"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
+type AuthResult struct {
+	Token *oauth2.Token
+	Error error
 }
 
-type TokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
-}
+func (f *OAuthFlow) StartLocalServer(ctx context.Context) (*oauth2.Token, error) {
+	resultChan := make(chan AuthResult, 1)
 
-func (d *DeviceFlow) RequestDeviceCode(ctx context.Context) (*DeviceCodeResponse, error) {
-	data := url.Values{}
-	data.Set("client_id", d.Credentials.ClientID)
-	data.Set("scope", strings.Join(Scopes, " "))
-
-	req, err := http.NewRequestWithContext(ctx, "POST", 
-		"https://oauth2.googleapis.com/device/code", 
-		strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := d.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp)
-	if err != nil {
-		return nil, err
-	}
-
-	var result DeviceCodeResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse device code response: %w", err)
-	}
-
-	return &result, nil
-}
-
-func (d *DeviceFlow) PollForToken(ctx context.Context, deviceCode string, interval int) (*oauth2.Token, error) {
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			token, err := d.requestToken(ctx, deviceCode)
-			if err != nil {
-				return nil, err
+	handler := http.NewServeMux()
+	handler.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errorDesc := r.URL.Query().Get("error_description")
+			if errorDesc == "" {
+				errorDesc = r.URL.Query().Get("error")
 			}
-			if token != nil {
-				return token, nil
-			}
+			http.Error(w, "Error: "+errorDesc, http.StatusBadRequest)
+			resultChan <- AuthResult{Error: fmt.Errorf("oauth error: %s", errorDesc)}
+			return
 		}
+
+		token, err := f.exchangeCode(ctx, code)
+		if err != nil {
+			http.Error(w, "Failed to exchange token: "+err.Error(), http.StatusInternalServerError)
+			resultChan <- AuthResult{Error: err}
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`
+			<html>
+			<head><title>Success</title></head>
+			<body style="font-family: sans-serif; text-align: center; padding: 50px;">
+				<h1 style="color: green;">✓ Success!</h1>
+				<p>You can close this window and return to the terminal.</p>
+			</body>
+			</html>
+		`))
+		resultChan <- AuthResult{Token: token}
+	})
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", f.Port),
+		Handler: handler,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			resultChan <- AuthResult{Error: err}
+		}
+	}()
+
+	authURL := f.getAuthURL()
+	fmt.Printf("\nOpening browser to:\n%s\n\n", authURL)
+	fmt.Println("If the browser doesn't open automatically, visit the URL above.")
+
+	err := openBrowser(authURL)
+	if err != nil {
+		fmt.Printf("Could not open browser: %v\n", err)
+		fmt.Println("Please visit the URL manually.")
+	}
+
+	select {
+	case result := <-resultChan:
+		server.Shutdown(ctx)
+		return result.Token, result.Error
+	case <-ctx.Done():
+		server.Shutdown(ctx)
+		return nil, ctx.Err()
 	}
 }
 
-func (d *DeviceFlow) requestToken(ctx context.Context, deviceCode string) (*oauth2.Token, error) {
-	data := url.Values{}
-	data.Set("client_id", d.Credentials.ClientID)
-	data.Set("client_secret", d.Credentials.ClientSecret)
-	data.Set("device_code", deviceCode)
-	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+func (f *OAuthFlow) getAuthURL() string {
+	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", f.Port)
+	params := url.Values{}
+	params.Set("client_id", f.Credentials.ClientID)
+	params.Set("redirect_uri", redirectURL)
+	params.Set("response_type", "code")
+	params.Set("scope", strings.Join(Scopes, " "))
+	params.Set("access_type", "offline")
+	params.Set("prompt", "consent")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", 
-		"https://oauth2.googleapis.com/token", 
+	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
+}
+
+func (f *OAuthFlow) exchangeCode(ctx context.Context, code string) (*oauth2.Token, error) {
+	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", f.Port)
+	data := url.Values{}
+	data.Set("client_id", f.Credentials.ClientID)
+	data.Set("client_secret", f.Credentials.ClientSecret)
+	data.Set("code", code)
+	data.Set("grant_type", "authorization_code")
+	data.Set("redirect_uri", redirectURL)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://oauth2.googleapis.com/token",
 		strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := d.httpClient.Do(req)
+	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := readBody(resp)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	var result TokenResponse
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
 	if result.Error != "" {
-		if result.Error == "authorization_pending" {
-			return nil, nil
-		}
-		if result.Error == "slow_down" {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("%s: %s", result.Error, result.ErrorDesc)
 	}
 
@@ -282,11 +309,28 @@ func (d *DeviceFlow) requestToken(ctx context.Context, deviceCode string) (*oaut
 	}, nil
 }
 
-func readBody(resp *http.Response) ([]byte, error) {
-	defer resp.Body.Close()
-	return readAll(resp.Body)
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch {
+	case commandExists("xdg-open"):
+		cmd = "xdg-open"
+		args = []string{url}
+	case commandExists("google-chrome"):
+		cmd = "google-chrome"
+		args = []string{url}
+	case commandExists("firefox"):
+		cmd = "firefox"
+		args = []string{url}
+	default:
+		return fmt.Errorf("no browser found")
+	}
+
+	return exec.Command(cmd, args...).Start()
 }
 
-func readAll(r io.Reader) ([]byte, error) {
-	return io.ReadAll(r)
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }

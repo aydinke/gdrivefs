@@ -25,6 +25,8 @@ type Filesystem struct {
 
 type OpenFile struct {
 	ID        string
+	Name      string
+	ParentID  string
 	TempPath  string
 	Flags     fuse.OpenFlags
 	WritePos  int64
@@ -48,6 +50,32 @@ func (f *Filesystem) Root() (fs.Node, error) {
 		ID:   f.rootID,
 		Name: "",
 	}, nil
+}
+
+func (f *Filesystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
+	quota, err := f.client.GetQuotaInfo(ctx)
+	if err != nil {
+		resp.Blocks = 1 << 50
+		resp.Bfree = 1 << 50
+		resp.Bavail = 1 << 50
+		resp.Files = 1 << 20
+		resp.Ffree = 1 << 20
+		resp.Bsize = 4096
+		resp.Namelen = 255
+		resp.Frsize = 4096
+		return nil
+	}
+
+	bsize := uint64(4096)
+	resp.Blocks = uint64(quota.Limit) / bsize
+	resp.Bfree = uint64(quota.Free) / bsize
+	resp.Bavail = uint64(quota.Free) / bsize
+	resp.Files = 1 << 20
+	resp.Ffree = 1 << 20
+	resp.Bsize = uint32(bsize)
+	resp.Namelen = 255
+	resp.Frsize = uint32(bsize)
+	return nil
 }
 
 func (f *Filesystem) Destroy() {
@@ -161,6 +189,8 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		return nil, nil, err
 	}
 	of := &OpenFile{
+		Name:     req.Name,
+		ParentID: d.ID,
 		TempPath: tmpFile.Name(),
 		Flags:    req.Flags,
 	}
@@ -372,7 +402,11 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 		} else {
 			file, err := os.Open(of.TempPath)
 			if err == nil {
-				meta, err := h.fs.client.Upload(ctx, h.fs.rootID, "newfile", file, "application/octet-stream")
+				parentID := of.ParentID
+				if parentID == "" {
+					parentID = h.fs.rootID
+				}
+				meta, err := h.fs.client.Upload(ctx, parentID, of.Name, file, "application/octet-stream")
 				if err == nil {
 					of.ID = meta.ID
 				}
