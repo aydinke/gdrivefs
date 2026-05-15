@@ -3,6 +3,7 @@ package fusefs
 import (
 	"context"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"syscall"
@@ -13,6 +14,8 @@ import (
 	"github.com/aydinke/gdrivefs/internal/cache"
 	"github.com/aydinke/gdrivefs/internal/drive"
 )
+
+var debugLog = log.New(os.Stderr, "[gdrivefs] ", log.LstdFlags)
 
 type Filesystem struct {
 	client    *drive.Client
@@ -51,18 +54,26 @@ func (f *Filesystem) SetServer(server *fs.Server) {
 
 func (f *Filesystem) invalidateEntry(parentID, name string) {
 	if f.server == nil {
+		debugLog.Printf("invalidateEntry: server is nil")
 		return
 	}
-	parentNode := &Dir{fs: f, ID: parentID}
-	f.server.InvalidateEntry(parentNode, name)
+	parent := &Dir{fs: f, ID: parentID}
+	debugLog.Printf("invalidateEntry: parentID=%s name=%s", parentID, name)
+	if err := f.server.InvalidateEntry(parent, name); err != nil {
+		debugLog.Printf("invalidateEntry error: %v", err)
+	}
 }
 
 func (f *Filesystem) invalidateNode(id string) {
 	if f.server == nil {
+		debugLog.Printf("invalidateNode: server is nil")
 		return
 	}
 	node := &File{fs: f, ID: id}
-	f.server.InvalidateNodeAttr(node)
+	debugLog.Printf("invalidateNode: id=%s", id)
+	if err := f.server.InvalidateNodeAttr(node); err != nil {
+		debugLog.Printf("invalidateNode error: %v", err)
+	}
 }
 
 func (f *Filesystem) Root() (fs.Node, error) {
@@ -418,13 +429,17 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	defer h.fs.mu.Unlock()
 	of, ok := h.fs.openFiles[h.fh]
 	if !ok {
+		debugLog.Printf("Release: openFile not found for fh=%d", h.fh)
 		return nil
 	}
+
+	debugLog.Printf("Release: name=%s parentID=%s modified=%v id=%s", of.Name, of.ParentID, of.Modified, of.ID)
 
 	if of.Modified {
 		if of.ID != "" {
 			file, err := os.Open(of.TempPath)
 			if err == nil {
+				debugLog.Printf("Release: updating existing file %s", of.ID)
 				h.fs.client.UploadWithConflictCheck(ctx, of.ID, file, of.LocalMod)
 				file.Close()
 				h.fs.invalidateNode(of.ID)
@@ -436,10 +451,14 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 				if parentID == "" {
 					parentID = h.fs.rootID
 				}
+				debugLog.Printf("Release: uploading new file %s to parent %s", of.Name, parentID)
 				meta, err := h.fs.client.Upload(ctx, parentID, of.Name, file, "application/octet-stream")
 				if err == nil {
 					of.ID = meta.ID
+					debugLog.Printf("Release: upload complete, id=%s", meta.ID)
 					h.fs.invalidateEntry(parentID, of.Name)
+				} else {
+					debugLog.Printf("Release: upload error: %v", err)
 				}
 				file.Close()
 			}
