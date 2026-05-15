@@ -21,6 +21,7 @@ type Filesystem struct {
 	openFiles map[uint64]*OpenFile
 	mu        sync.RWMutex
 	nextFH    uint64
+	server    *fs.Server
 }
 
 type OpenFile struct {
@@ -42,6 +43,26 @@ func NewFilesystem(client *drive.Client, rootID string) *Filesystem {
 		openFiles: make(map[uint64]*OpenFile),
 		nextFH:    1,
 	}
+}
+
+func (f *Filesystem) SetServer(server *fs.Server) {
+	f.server = server
+}
+
+func (f *Filesystem) invalidateEntry(parentID, name string) {
+	if f.server == nil {
+		return
+	}
+	parentNode := &Dir{fs: f, ID: parentID}
+	f.server.InvalidateEntry(parentNode, name)
+}
+
+func (f *Filesystem) invalidateNode(id string) {
+	if f.server == nil {
+		return
+	}
+	node := &File{fs: f, ID: id}
+	f.server.InvalidateNodeAttr(node)
 }
 
 func (f *Filesystem) Root() (fs.Node, error) {
@@ -180,6 +201,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	if err != nil {
 		return nil, err
 	}
+	d.fs.invalidateEntry(d.ID, req.Name)
 	return &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}, nil
 }
 
@@ -210,7 +232,12 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if err != nil {
 		return err
 	}
-	return d.fs.client.Delete(ctx, meta.ID)
+	err = d.fs.client.Delete(ctx, meta.ID)
+	if err != nil {
+		return err
+	}
+	d.fs.invalidateEntry(d.ID, req.Name)
+	return nil
 }
 
 func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
@@ -232,6 +259,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 			return err
 		}
 	}
+	d.fs.invalidateEntry(d.ID, req.OldName)
+	d.fs.invalidateEntry(newDirNode.ID, req.NewName)
 	return nil
 }
 
@@ -398,6 +427,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 			if err == nil {
 				h.fs.client.UploadWithConflictCheck(ctx, of.ID, file, of.LocalMod)
 				file.Close()
+				h.fs.invalidateNode(of.ID)
 			}
 		} else {
 			file, err := os.Open(of.TempPath)
@@ -409,6 +439,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 				meta, err := h.fs.client.Upload(ctx, parentID, of.Name, file, "application/octet-stream")
 				if err == nil {
 					of.ID = meta.ID
+					h.fs.invalidateEntry(parentID, of.Name)
 				}
 				file.Close()
 			}

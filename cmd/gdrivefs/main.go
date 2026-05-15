@@ -305,7 +305,10 @@ func runMount(cmd *cobra.Command, args []string) {
 	fmt.Printf("Mounted Google Drive at %s\n", absMountpoint)
 	fmt.Println("Press Ctrl+C to unmount")
 
-	if err := fs.Serve(fsc, filesys); err != nil {
+	server := fs.New(fsc, nil)
+	filesys.SetServer(server)
+
+	if err := server.Serve(filesys); err != nil {
 		fmt.Fprintf(os.Stderr, "Serve error: %v\n", err)
 		os.Exit(1)
 	}
