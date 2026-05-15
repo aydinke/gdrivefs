@@ -195,7 +195,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
 	a.Inode = d.fs.inodes.GetOrAssign(d.ID)
-	a.Valid = 5 * time.Second
+	a.Valid = 0
 	return nil
 }
 
@@ -341,26 +341,40 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	if f.ID == "" {
 		return nil, fuse.EIO
 	}
+
 	tmpFile, err := f.fs.client.CreateTempUploadFile()
 	if err != nil {
+		debugLog.Printf("Open: create temp file error: %v", err)
 		return nil, err
 	}
-	defer tmpFile.Close()
 
-	rc, err := f.fs.client.Download(ctx, f.ID)
+	var rc io.ReadCloser
+	if drive.IsGoogleDoc(f.meta.MimeType) {
+		exportMime := drive.GetExportMimeType(f.meta.MimeType)
+		rc, err = f.fs.client.ExportGoogleDoc(ctx, f.ID, exportMime)
+	} else {
+		rc, err = f.fs.client.Download(ctx, f.ID)
+	}
+	if err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		debugLog.Printf("Open: download error for %s: %v", f.Name, err)
+		return nil, err
+	}
+
+	_, err = tmpFile.ReadFrom(rc)
+	rc.Close()
+	tmpFile.Close()
 	if err != nil {
 		os.Remove(tmpFile.Name())
-		return nil, err
-	}
-	defer rc.Close()
-
-	if _, err := tmpFile.ReadFrom(rc); err != nil {
-		os.Remove(tmpFile.Name())
+		debugLog.Printf("Open: write temp file error: %v", err)
 		return nil, err
 	}
 
 	of := &OpenFile{
 		ID:       f.ID,
+		Name:     f.Name,
+		ParentID: "",
 		TempPath: tmpFile.Name(),
 		Flags:    req.Flags,
 		LocalMod: time.Now(),
@@ -372,8 +386,6 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	f.fs.openFiles[fh] = of
 	f.fs.mu.Unlock()
 
-	f.tempPath = tmpFile.Name()
-	f.fh = fh
 	return &FileHandle{fs: f.fs, fh: fh}, nil
 }
 
@@ -387,18 +399,21 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	of, ok := h.fs.openFiles[h.fh]
 	h.fs.mu.RUnlock()
 	if !ok {
+		debugLog.Printf("Read: openFile not found for fh=%d", h.fh)
 		return fuse.EIO
 	}
 
-	data := make([]byte, req.Size)
 	file, err := os.Open(of.TempPath)
 	if err != nil {
+		debugLog.Printf("Read: open temp file error: %v", err)
 		return err
 	}
 	defer file.Close()
 
+	data := make([]byte, req.Size)
 	n, err := file.ReadAt(data, req.Offset)
 	if err != nil && err != io.EOF {
+		debugLog.Printf("Read: read error at offset=%d size=%d: %v", req.Offset, req.Size, err)
 		return err
 	}
 	resp.Data = data[:n]
