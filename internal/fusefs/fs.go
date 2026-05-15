@@ -1,4 +1,4 @@
-package fuse
+package fusefs
 
 import (
 	"context"

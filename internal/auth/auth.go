@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	DefaultClientID     = "PLACEHOLDER_CLIENT_ID.apps.googleusercontent.com"
-	DefaultClientSecret = "PLACEHOLDER_CLIENT_SECRET"
+	DefaultClientID     = ""
+	DefaultClientSecret = ""
 )
 
 var (
@@ -39,10 +39,16 @@ func DefaultCredentials() *Credentials {
 	}
 }
 
+func CredentialsFromEnv() *Credentials {
+	return &Credentials{
+		ClientID:     os.Getenv("GDRIVEFS_CLIENT_ID"),
+		ClientSecret: os.Getenv("GDRIVEFS_CLIENT_SECRET"),
+	}
+}
+
 func (c *Credentials) IsValid() bool {
-	return c.ClientID != "" && 
-		c.ClientSecret != "" && 
-		c.ClientID != "PLACEHOLDER_CLIENT_ID.apps.googleusercontent.com" &&
+	return c.ClientID != "" &&
+		c.ClientSecret != "" &&
 		strings.Contains(c.ClientID, ".apps.googleusercontent.com")
 }
 

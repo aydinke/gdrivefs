@@ -113,7 +113,16 @@ func runAuthLogin(cmd *cobra.Command, args []string) {
 	creds := config.GetCredentials()
 	if !creds.IsValid() {
 		fmt.Fprintln(os.Stderr, "No valid OAuth credentials configured.")
-		fmt.Fprintln(os.Stderr, "Please set up a Google Cloud project (see README) or configure credentials.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Set credentials via environment variables:")
+		fmt.Fprintln(os.Stderr, "  export GDRIVEFS_CLIENT_ID=\"your-client-id.apps.googleusercontent.com\"")
+		fmt.Fprintln(os.Stderr, "  export GDRIVEFS_CLIENT_SECRET=\"your-client-secret\"")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Or add to ~/.config/gdrivefs/config.yaml:")
+		fmt.Fprintln(os.Stderr, "  client_id: \"your-client-id.apps.googleusercontent.com\"")
+		fmt.Fprintln(os.Stderr, "  client_secret: \"your-client-secret\"")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "See README for instructions on creating Google Cloud OAuth credentials.")
 		os.Exit(1)
 	}
 
@@ -232,7 +241,6 @@ func runMount(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	cfg := config.Get()
 	creds := config.GetCredentials()
 	oauthCfg := &oauth2.Config{
 		ClientID:     creds.ClientID,
@@ -260,8 +268,6 @@ func runMount(cmd *cobra.Command, args []string) {
 	options := []fuse.MountOption{
 		fuse.FSName("gdrivefs"),
 		fuse.Subtype("gdrivefs"),
-		fuse.LocalVolume(),
-		fuse.VolumeName("Google Drive"),
 	}
 
 	if readOnlyFlag {
@@ -293,12 +299,6 @@ func runMount(cmd *cobra.Command, args []string) {
 
 	if err := fs.Serve(fsc, filesys); err != nil {
 		fmt.Fprintf(os.Stderr, "Serve error: %v\n", err)
-		os.Exit(1)
-	}
-
-	<-fsc.Ready
-	if err := fsc.MountError; err != nil {
-		fmt.Fprintf(os.Stderr, "Mount error: %v\n", err)
 		os.Exit(1)
 	}
 }

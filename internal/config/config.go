@@ -97,6 +97,9 @@ func GetUploadsPath() string {
 }
 
 func GetCredentials() *auth.Credentials {
+	if envCreds := auth.CredentialsFromEnv(); envCreds.IsValid() {
+		return envCreds
+	}
 	if cfg != nil && cfg.ClientID != "" && cfg.ClientSecret != "" {
 		return &auth.Credentials{
 			ClientID:     cfg.ClientID,
