@@ -130,6 +130,7 @@ func (c *Client) Upload(ctx context.Context, parentID, name string, content io.R
 	}
 	meta := fileToMeta(uploaded)
 	c.cache.Put(meta)
+	c.cache.InvalidateParent(parentID)
 	return meta, nil
 }
 
@@ -166,12 +167,48 @@ func (c *Client) CreateFolder(ctx context.Context, parentID, name string) (*cach
 }
 
 func (c *Client) Delete(ctx context.Context, id string) error {
+	meta, _ := c.cache.Get(id)
 	_, err := c.svc.Files.Update(id, &drive.File{Trashed: true}).Context(ctx).Do()
 	if err != nil {
 		return err
 	}
 	c.cache.Delete(id)
+	if meta != nil && meta.ParentID != "" {
+		c.cache.InvalidateParent(meta.ParentID)
+	}
 	return nil
+}
+
+func (c *Client) EmptyTrash(ctx context.Context) error {
+	return c.svc.Files.EmptyTrash().Context(ctx).Do()
+}
+
+func (c *Client) ListTrash(ctx context.Context) ([]*cache.FileMeta, error) {
+	query := "trashed=true"
+	var allFiles []*drive.File
+	pageToken := ""
+	for {
+		files, err := c.svc.Files.List().
+			Q(query).
+			PageToken(pageToken).
+			Fields("nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,md5Checksum)").
+			PageSize(1000).
+			Context(ctx).
+			Do()
+		if err != nil {
+			return nil, err
+		}
+		allFiles = append(allFiles, files.Files...)
+		if files.NextPageToken == "" {
+			break
+		}
+		pageToken = files.NextPageToken
+	}
+	metas := make([]*cache.FileMeta, len(allFiles))
+	for i, f := range allFiles {
+		metas[i] = fileToMeta(f)
+	}
+	return metas, nil
 }
 
 func (c *Client) Rename(ctx context.Context, id, newName string) (*cache.FileMeta, error) {

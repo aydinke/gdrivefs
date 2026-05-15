@@ -95,9 +95,27 @@ var statusCmd = &cobra.Command{
 	Run:   runStatus,
 }
 
+var trashCmd = &cobra.Command{
+	Use:   "trash",
+	Short: "Manage Google Drive trash",
+}
+
+var trashListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List files in trash",
+	Run:   runTrashList,
+}
+
+var trashEmptyCmd = &cobra.Command{
+	Use:   "empty",
+	Short: "Permanently delete all files in trash",
+	Run:   runTrashEmpty,
+}
+
 func init() {
-	rootCmd.AddCommand(authCmd, mountCmd, unmountCmd, enableCmd, disableCmd, statusCmd)
+	rootCmd.AddCommand(authCmd, mountCmd, unmountCmd, enableCmd, disableCmd, statusCmd, trashCmd)
 	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd)
+	trashCmd.AddCommand(trashListCmd, trashEmptyCmd)
 
 	mountCmd.Flags().BoolVarP(&daemonFlag, "daemon", "d", false, "Run in background (daemon mode)")
 	mountCmd.Flags().BoolVarP(&readOnlyFlag, "read-only", "r", false, "Mount read-only")
@@ -409,4 +427,86 @@ func getHomeDir() string {
 		return os.Getenv("HOME")
 	}
 	return usr.HomeDir
+}
+
+func getDriveClient(ctx context.Context) (*drive.Client, error) {
+	store, err := auth.NewTokenStore(config.GetTokenPath())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token store: %w", err)
+	}
+
+	if !store.Exists() {
+		return nil, fmt.Errorf("not authenticated. Run 'gdrivefs auth login' first")
+	}
+
+	token, err := store.Load()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load token: %w", err)
+	}
+
+	creds := config.GetCredentials()
+	oauthCfg := &oauth2.Config{
+		ClientID:     creds.ClientID,
+		ClientSecret: creds.ClientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://oauth2.googleapis.com/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		Scopes: auth.Scopes,
+	}
+
+	c := cache.New(30 * time.Second)
+	return drive.NewClient(ctx, token, oauthCfg, c, config.GetUploadsPath())
+}
+
+func runTrashList(cmd *cobra.Command, args []string) {
+	ctx := context.Background()
+	if err := config.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize config: %v\n", err)
+		os.Exit(1)
+	}
+
+	client, err := getDriveClient(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	files, err := client.ListTrash(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to list trash: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(files) == 0 {
+		fmt.Println("Trash is empty")
+		return
+	}
+
+	fmt.Printf("Files in trash (%d):\n", len(files))
+	for _, f := range files {
+		fmt.Printf("  %s (%s)\n", f.Name, f.ID)
+	}
+}
+
+func runTrashEmpty(cmd *cobra.Command, args []string) {
+	ctx := context.Background()
+	if err := config.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize config: %v\n", err)
+		os.Exit(1)
+	}
+
+	client, err := getDriveClient(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Emptying trash...")
+	if err := client.EmptyTrash(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to empty trash: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Trash emptied successfully")
 }

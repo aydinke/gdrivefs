@@ -111,6 +111,12 @@ func (c *Cache) Clear() {
 	c.created = time.Now()
 }
 
+func (c *Cache) InvalidateParent(parentID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byParent, parentID)
+}
+
 func (c *Cache) expired() bool {
 	return time.Since(c.created) > c.ttl
 }
