@@ -25,6 +25,8 @@ type Filesystem struct {
 	mu        sync.RWMutex
 	nextFH    uint64
 	server    *fs.Server
+	nodeCache map[string]fs.Node
+	nodeMu    sync.RWMutex
 }
 
 type OpenFile struct {
@@ -45,6 +47,7 @@ func NewFilesystem(client *drive.Client, rootID string) *Filesystem {
 		inodes:    NewInodeMap(),
 		openFiles: make(map[uint64]*OpenFile),
 		nextFH:    1,
+		nodeCache: make(map[string]fs.Node),
 	}
 }
 
@@ -52,21 +55,33 @@ func (f *Filesystem) SetServer(server *fs.Server) {
 	f.server = server
 }
 
+func (f *Filesystem) registerNode(id string, node fs.Node) {
+	f.nodeMu.Lock()
+	defer f.nodeMu.Unlock()
+	f.nodeCache[id] = node
+}
+
+func (f *Filesystem) getNode(id string) fs.Node {
+	f.nodeMu.RLock()
+	defer f.nodeMu.RUnlock()
+	return f.nodeCache[id]
+}
+
 func (f *Filesystem) invalidateEntry(parentID, name string) {
 	if f.server == nil {
-		debugLog.Printf("invalidateEntry: server is nil")
 		return
 	}
-	parent := &Dir{fs: f, ID: parentID}
+	parent := f.getNode(parentID)
+	if parent == nil {
+		debugLog.Printf("invalidateEntry: parent node not found in cache for %s", parentID)
+		return
+	}
 	debugLog.Printf("invalidateEntry: parentID=%s name=%s", parentID, name)
-	
-	// Try to invalidate the specific entry
-	err := f.server.InvalidateEntry(parent, name)
-	if err != nil {
+
+	if err := f.server.InvalidateEntry(parent, name); err != nil {
 		debugLog.Printf("invalidateEntry error: %v", err)
 	}
-	
-	// Also invalidate parent directory attributes to force re-read
+
 	if err := f.server.InvalidateNodeAttr(parent); err != nil {
 		debugLog.Printf("invalidateNodeAttr (parent) error: %v", err)
 	}
@@ -74,10 +89,13 @@ func (f *Filesystem) invalidateEntry(parentID, name string) {
 
 func (f *Filesystem) invalidateNode(id string) {
 	if f.server == nil {
-		debugLog.Printf("invalidateNode: server is nil")
 		return
 	}
-	node := &File{fs: f, ID: id}
+	node := f.getNode(id)
+	if node == nil {
+		debugLog.Printf("invalidateNode: node not found in cache for %s", id)
+		return
+	}
 	debugLog.Printf("invalidateNode: id=%s", id)
 	if err := f.server.InvalidateNodeAttr(node); err != nil {
 		debugLog.Printf("invalidateNode error: %v", err)
@@ -85,11 +103,13 @@ func (f *Filesystem) invalidateNode(id string) {
 }
 
 func (f *Filesystem) Root() (fs.Node, error) {
-	return &Dir{
+	root := &Dir{
 		fs:   f,
 		ID:   f.rootID,
 		Name: "",
-	}, nil
+	}
+	f.registerNode(f.rootID, root)
+	return root, nil
 }
 
 func (f *Filesystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
@@ -188,9 +208,13 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		return nil, err
 	}
 	if meta.IsDir {
-		return &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}, nil
+		node := &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}
+		d.fs.registerNode(meta.ID, node)
+		return node, nil
 	}
-	return &File{fs: d.fs, ID: meta.ID, Name: meta.Name, meta: meta}, nil
+	node := &File{fs: d.fs, ID: meta.ID, Name: meta.Name, meta: meta}
+	d.fs.registerNode(meta.ID, node)
+	return node, nil
 }
 
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
@@ -220,8 +244,10 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	if err != nil {
 		return nil, err
 	}
+	node := &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}
+	d.fs.registerNode(meta.ID, node)
 	d.fs.invalidateEntry(d.ID, req.Name)
-	return &Dir{fs: d.fs, ID: meta.ID, Name: meta.Name}, nil
+	return node, nil
 }
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
