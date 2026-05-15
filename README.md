@@ -12,15 +12,18 @@ Google Drive FUSE filesystem for Linux. Mount your Google Drive as a local files
 - **systemd Integration**: Auto-remount on boot via user service
 - **Metadata Caching**: Reduces API calls with configurable TTL
 
-## Requirements
+## Quick Start
 
-- Linux with FUSE support (kernel 2.6.19+)
-- Go 1.22+
-- Google Cloud project with Drive API enabled
+### 1. Install
 
-## Installation
+```bash
+# Download latest release
+curl -sL https://github.com/aydinke/gdrivefs/releases/latest/download/gdrivefs-linux-amd64 -o gdrivefs
+chmod +x gdrivefs
+sudo mv gdrivefs /usr/local/bin/
+```
 
-### From Source
+Or build from source:
 
 ```bash
 git clone https://github.com/aydinke/gdrivefs.git
@@ -29,7 +32,47 @@ go build -o gdrivefs ./cmd/gdrivefs
 sudo mv gdrivefs /usr/local/bin/
 ```
 
-### Dependencies
+### 2. Authenticate
+
+```bash
+gdrivefs auth login
+```
+
+This will:
+1. Display a URL and code
+2. Open the URL in your browser
+3. Enter the code to authorize
+4. Save encrypted token to `~/.local/share/gdrivefs/`
+
+### 3. Mount
+
+```bash
+# Create mount point
+mkdir -p ~/Drive
+
+# Mount (foreground)
+gdrivefs mount ~/Drive
+
+# Mount (background/daemon)
+gdrivefs mount -d ~/Drive
+
+# Read-only
+gdrivefs mount -r ~/Drive
+```
+
+### 4. Auto-mount on Boot
+
+```bash
+gdrivefs enable
+systemctl --user enable --now gdrivefs
+```
+
+## Requirements
+
+- Linux with FUSE support (kernel 2.6.19+)
+- Go 1.22+ (for building)
+
+### Install FUSE
 
 ```bash
 # Ubuntu/Debian
@@ -37,104 +80,68 @@ sudo apt install fuse3
 
 # Arch Linux
 sudo pacman -S fuse3
+
+# Fedora
+sudo dnf install fuse3
 ```
 
-## Setup
+## Usage
 
-### 1. Create Google Cloud Project
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable Google Drive API
-4. Create OAuth 2.0 credentials (Desktop application)
-5. Note your Client ID and Client Secret
-
-### 2. Configure gdrivefs
-
-Create the config file:
+### Authentication
 
 ```bash
-mkdir -p ~/.config/gdrivefs
-cat > ~/.config/gdrivefs/config.yaml << EOF
-client_id: "YOUR_CLIENT_ID.apps.googleusercontent.com"
-client_secret: "YOUR_CLIENT_SECRET"
+gdrivefs auth login    # Authenticate with Google
+gdrivefs auth status   # Check auth status
+gdrivefs auth logout   # Remove stored token
+```
+
+### Mount Operations
+
+```bash
+gdrivefs mount ~/Drive              # Foreground mount
+gdrivefs mount -d ~/Drive           # Daemon mode
+gdrivefs mount -r ~/Drive           # Read-only
+gdrivefs unmount ~/Drive            # Unmount
+```
+
+### systemd Integration
+
+```bash
+gdrivefs enable     # Create systemd user service
+gdrivefs disable    # Remove systemd service
+gdrivefs status     # Show status
+```
+
+## OAuth Credentials
+
+**Default (easiest)**: Uses embedded shared credentials. Just run `gdrivefs auth login`.
+
+**Custom credentials** (optional): Create `~/.config/gdrivefs/config.yaml`:
+
+```yaml
+client_id: "your-client-id.apps.googleusercontent.com"
+client_secret: "your-client-secret"
 mounts:
   default:
     path: ~/Drive
     auto_mount: true
     read_only: false
-EOF
 ```
 
-### 3. Authenticate
+### Creating Your Own OAuth App (Optional)
 
-```bash
-gdrivefs auth login
-```
+If you want to use your own Google Cloud project:
 
-This will:
-1. Print a URL and code
-2. Open the URL in your browser
-3. Enter the code to authorize
-4. Save encrypted token to `~/.local/share/gdrivefs/token.enc`
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project
+3. Enable Google Drive API
+4. Go to "APIs & Services" → "Credentials"
+5. Create "OAuth client ID" → "Desktop application"
+6. Copy Client ID and Client Secret to config.yaml
 
-## Usage
-
-### Mount Google Drive
-
-```bash
-# Foreground (Ctrl+C to unmount)
-gdrivefs mount ~/Drive
-
-# Daemon mode (background)
-gdrivefs mount -d ~/Drive
-
-# Read-only
-gdrivefs mount -r ~/Drive
-```
-
-### Unmount
-
-```bash
-gdrivefs unmount ~/Drive
-# or
-fusermount -u ~/Drive
-```
-
-### Auto-mount on Boot
-
-```bash
-# Enable systemd user service
-gdrivefs enable
-systemctl --user enable --now gdrivefs
-
-# Disable
-gdrivefs disable
-systemctl --user disable gdrivefs
-```
-
-### Check Status
-
-```bash
-gdrivefs status
-gdrivefs auth status
-```
-
-## File Layout
-
-```
-~/.config/gdrivefs/
-├── config.yaml           # Configuration
-
-~/.local/share/gdrivefs/
-├── token.enc             # Encrypted OAuth token
-├── token.enc.key         # Encryption key
-└── uploads/              # Temp files for uploads
-```
+**Note**: Apps in "Testing" mode show an "unverified app" warning. This is safe for personal use.
 
 ## How It Works
-
-### Architecture
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -181,18 +188,63 @@ When writing a file:
 ## Limitations
 
 - **Partial writes**: Downloaded to temp file, uploaded on close
-- **Large files**: Memory/disk usage for temp files
-- **Google Docs**: Exported as PDF/Office formats (read-only for Docs)
+- **Large files**: Temp file disk usage
+- **Google Docs**: Exported as PDF/Office formats (read-only for native Docs)
 - **Rate limits**: Drive API quotas may limit operations
 - **No offline mode**: Requires network connection
 
-## Development
+## Troubleshooting
 
-### Build
+### "transport endpoint is not connected"
 
 ```bash
+fusermount -uz ~/Drive
+gdrivefs mount ~/Drive
+```
+
+### "permission denied"
+
+Ensure your user is in the `fuse` group:
+```bash
+sudo usermod -aG fuse $USER
+# Log out and back in
+```
+
+### "not authenticated" but token exists
+
+Token may need refresh:
+```bash
+gdrivefs auth logout
+gdrivefs auth login
+```
+
+### Mount shows empty
+
+Check network connectivity and Drive API status.
+
+## File Locations
+
+```
+~/.config/gdrivefs/
+├── config.yaml           # Optional custom config
+
+~/.local/share/gdrivefs/
+├── token.enc             # Encrypted OAuth token
+├── token.enc.key         # Encryption key
+└── uploads/              # Temp files for uploads
+```
+
+## Development
+
+```bash
+# Build
 go build ./...
+
+# Test
 go test ./...
+
+# Lint
+go vet ./...
 ```
 
 ### Project Structure
@@ -209,29 +261,12 @@ gdrivefs/
 └── go.mod
 ```
 
-## Troubleshooting
+## Security
 
-### "transport endpoint is not connected"
-
-```bash
-fusermount -uz ~/Drive
-```
-
-### "permission denied"
-
-Ensure your user is in the `fuse` group:
-```bash
-sudo usermod -aG fuse $USER
-# Log out and back in
-```
-
-### Token expired
-
-Tokens are automatically refreshed. If refresh fails:
-```bash
-gdrivefs auth logout
-gdrivefs auth login
-```
+- OAuth tokens are encrypted using [age](https://filippo.io/age/) encryption
+- Each user has a unique encryption key stored locally
+- Credentials are never transmitted off the local machine
+- Users authenticate directly with Google (OAuth 2.0)
 
 ## License
 
@@ -242,8 +277,14 @@ GPL-3.0 - See [LICENSE](LICENSE)
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests
+4. Run tests and lint
 5. Submit a pull request
+
+## Similar Projects
+
+- [rclone mount](https://rclone.org/commands/rclone_mount/) - Multi-cloud FUSE mount
+- [google-drive-ocamlfuse](https://github.com/astrada/google-drive-ocamlfuse) - OCaml-based Drive FUSE
+- [fuse](https://github.com/bazil/fuse) - Go FUSE library used here
 
 ## Acknowledgments
 

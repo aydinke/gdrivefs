@@ -5,19 +5,20 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/aydinke/gdrivefs/internal/auth"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Mounts    map[string]MountConfig `yaml:"mounts"`
-	ClientID  string                 `yaml:"client_id"`
-	ClientSecret string              `yaml:"client_secret"`
+	ClientID     string                 `yaml:"client_id,omitempty"`
+	ClientSecret string                 `yaml:"client_secret,omitempty"`
+	Mounts       map[string]MountConfig `yaml:"mounts"`
 }
 
 type MountConfig struct {
-	Path        string `yaml:"path"`
-	AutoMount   bool   `yaml:"auto_mount"`
-	ReadOnly    bool   `yaml:"read_only"`
+	Path      string `yaml:"path"`
+	AutoMount bool   `yaml:"auto_mount"`
+	ReadOnly  bool   `yaml:"read_only"`
 }
 
 var (
@@ -40,7 +41,15 @@ func Load() (*Config, error) {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Config{Mounts: make(map[string]MountConfig)}, nil
+			return &Config{
+				Mounts: map[string]MountConfig{
+					"default": {
+						Path:      filepath.Join(os.Getenv("HOME"), "Drive"),
+						AutoMount: true,
+						ReadOnly:  false,
+					},
+				},
+			}, nil
 		}
 		return nil, err
 	}
@@ -85,4 +94,14 @@ func GetTokenPath() string {
 
 func GetUploadsPath() string {
 	return filepath.Join(GetDataPath(), "uploads")
+}
+
+func GetCredentials() *auth.Credentials {
+	if cfg != nil && cfg.ClientID != "" && cfg.ClientSecret != "" {
+		return &auth.Credentials{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+		}
+	}
+	return auth.DefaultCredentials()
 }

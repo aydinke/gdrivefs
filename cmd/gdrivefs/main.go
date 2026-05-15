@@ -105,13 +105,19 @@ func init() {
 
 func runAuthLogin(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
-	cfg := config.Get()
-	if cfg == nil {
-		fmt.Fprintln(os.Stderr, "Config not initialized")
+	if err := config.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize config: %v\n", err)
 		os.Exit(1)
 	}
 
-	df := auth.NewDeviceFlow(cfg.ClientID, cfg.ClientSecret, auth.Scopes)
+	creds := config.GetCredentials()
+	if !creds.IsValid() {
+		fmt.Fprintln(os.Stderr, "No valid OAuth credentials configured.")
+		fmt.Fprintln(os.Stderr, "Please set up a Google Cloud project (see README) or configure credentials.")
+		os.Exit(1)
+	}
+
+	df := auth.NewDeviceFlow(creds)
 
 	fmt.Println("Starting OAuth device flow...")
 	deviceCode, err := df.RequestDeviceCode(ctx)
@@ -120,9 +126,11 @@ func runAuthLogin(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nPlease visit: %s\n", deviceCode.VerificationURL)
-	fmt.Printf("And enter code: %s\n\n", deviceCode.UserCode)
-	fmt.Println("Waiting for authorization...")
+	fmt.Printf("\n╭───────────────────────────────────────────────────────╮\n")
+	fmt.Printf("│  Please visit: %-39s │\n", deviceCode.VerificationURL)
+	fmt.Printf("│  And enter code: %-36s │\n", deviceCode.UserCode)
+	fmt.Printf("╰───────────────────────────────────────────────────────╯\n")
+	fmt.Println("\nWaiting for authorization...")
 
 	pollCtx, cancel := context.WithTimeout(ctx, time.Duration(deviceCode.ExpiresIn)*time.Second)
 	defer cancel()
@@ -144,7 +152,7 @@ func runAuthLogin(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Successfully authenticated!")
+	fmt.Println("✓ Successfully authenticated!")
 }
 
 func runAuthLogout(cmd *cobra.Command, args []string) {
@@ -225,9 +233,10 @@ func runMount(cmd *cobra.Command, args []string) {
 	}
 
 	cfg := config.Get()
+	creds := config.GetCredentials()
 	oauthCfg := &oauth2.Config{
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
+		ClientID:     creds.ClientID,
+		ClientSecret: creds.ClientSecret,
 		Endpoint: oauth2.Endpoint{
 			AuthURL:  "https://oauth2.googleapis.com/auth",
 			TokenURL: "https://oauth2.googleapis.com/token",
