@@ -59,8 +59,16 @@ func (f *Filesystem) invalidateEntry(parentID, name string) {
 	}
 	parent := &Dir{fs: f, ID: parentID}
 	debugLog.Printf("invalidateEntry: parentID=%s name=%s", parentID, name)
-	if err := f.server.InvalidateEntry(parent, name); err != nil {
+	
+	// Try to invalidate the specific entry
+	err := f.server.InvalidateEntry(parent, name)
+	if err != nil {
 		debugLog.Printf("invalidateEntry error: %v", err)
+	}
+	
+	// Also invalidate parent directory attributes to force re-read
+	if err := f.server.InvalidateNodeAttr(parent); err != nil {
+		debugLog.Printf("invalidateNodeAttr (parent) error: %v", err)
 	}
 }
 
