@@ -37,6 +37,10 @@ func NewClient(ctx context.Context, token *oauth2.Token, cfg *oauth2.Config, c *
 	}, nil
 }
 
+func (c *Client) Cache() *cache.Cache {
+	return c.cache
+}
+
 func (c *Client) GetFile(ctx context.Context, id string) (*cache.FileMeta, error) {
 	if f, ok := c.cache.Get(id); ok {
 		return f, nil

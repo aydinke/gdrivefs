@@ -291,8 +291,6 @@ func runMount(cmd *cobra.Command, args []string) {
 	defer fsc.Close()
 
 	filesys := fusefs.NewFilesystem(client, rootID)
-	server := fs.New(fsc, nil)
-	filesys.SetServer(server)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -307,7 +305,7 @@ func runMount(cmd *cobra.Command, args []string) {
 	fmt.Printf("Mounted Google Drive at %s\n", absMountpoint)
 	fmt.Println("Press Ctrl+C to unmount")
 
-	if err := server.Serve(filesys); err != nil {
+	if err := fs.Serve(fsc, filesys); err != nil {
 		fmt.Fprintf(os.Stderr, "Serve error: %v\n", err)
 		os.Exit(1)
 	}
